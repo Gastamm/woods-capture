@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1e3a2c">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<title>Woods Capture</title>
+<style>
+:root{--spruce:#1e3a2c;--lichen:#e3e9dc;--bark:#7a5a3a;--amber:#e0a100;--red:#b3261e;--ok:#2f7d3a;--ink:#17201b}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;flex-direction:column;height:100dvh;background:var(--lichen);color:var(--ink);font:16px/1.4 system-ui,sans-serif;padding-top:env(safe-area-inset-top)}
+button,select,input,textarea{font:inherit}
+button{min-height:44px;border:0;border-radius:10px;padding:0 14px;background:var(--spruce);color:#fff}
+button.alt{background:#fff;color:var(--spruce);border:2px solid var(--spruce)}
+button.danger{background:var(--red)}
+button:disabled{opacity:.4}
+select,input,textarea{width:100%;min-height:44px;border:1.5px solid #9aa896;border-radius:10px;padding:8px 10px;background:#fff}
+#gps{padding:8px 12px;color:#fff;font-weight:600;background:#555;display:flex;justify-content:space-between;gap:8px}
+#gps.good{background:var(--ok)}#gps.fair{background:#9a7400}#gps.bad{background:var(--red)}
+#cam{flex:1;position:relative;background:#000;min-height:0}
+#v{width:100%;height:100%;object-fit:cover}
+#camMsg{position:absolute;inset:0;display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center;color:#fff;text-align:center;padding:24px}
+#flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .25s}
+#flash.on{opacity:.8;transition:none}
+#ctl{background:var(--spruce);color:#fff;padding:10px 12px;display:grid;gap:8px}
+#ctl .row{display:flex;gap:8px;align-items:center}
+#ctl select{width:auto;flex:1}
+#strip{display:flex;gap:6px;overflow-x:auto;min-height:0}
+#strip img{height:48px;border-radius:6px}
+#shutter{width:76px;height:76px;border-radius:50%;background:#fff;border:6px solid var(--amber);padding:0}
+#shutter:disabled{background:#999}
+#rev{flex:1;overflow-y:auto;padding:12px;display:grid;gap:12px;align-content:start}
+.card{background:#fff;border-radius:12px;padding:12px;display:grid;gap:8px}
+.card h3{margin:0;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.card h3 select{width:auto}
+.thumbs{display:flex;flex-wrap:wrap;gap:6px}
+.thumbs figure{margin:0;position:relative}
+.thumbs img{height:72px;border-radius:6px;display:block}
+.thumbs button{position:absolute;top:2px;right:2px;min-height:28px;width:28px;padding:0;border-radius:50%;background:rgba(0,0,0,.65)}
+.meta{margin:0;color:#4a5a50;font-size:14px}
+nav{display:flex;background:#fff;border-top:1px solid #9aa896;padding-bottom:env(safe-area-inset-bottom)}
+nav button{flex:1;border-radius:0;background:#fff;color:var(--spruce);min-height:52px;font-weight:600}
+nav button.on{background:var(--spruce);color:#fff}
+[hidden]{display:none!important}
+</style></head><body>
+<div id="gps"><span id="gpsTxt">Starting GPS…</span><span id="ver">v1</span></div>
+<div id="cam">
+  <video id="v" playsinline muted></video>
+  <div id="flash"></div>
+  <div id="camMsg" hidden><p id="camErr"></p><button id="startCam">Start camera</button></div>
+</div>
+<div id="ctl">
+  <div class="row"><strong id="setInfo" style="flex:1">No set yet</strong></div>
+  <div class="row"><select id="type"></select><button id="newSet" class="alt">New set</button></div>
+  <div id="strip"></div>
+  <div class="row" style="justify-content:space-between">
+    <label class="alt" style="display:inline-flex;align-items:center;min-height:44px;padding:0 12px;border-radius:10px;background:#fff;color:var(--spruce);font-size:14px">Phone camera app<input id="native" type="file" accept="image/*" capture="environment" multiple hidden></label>
+    <button id="shutter" aria-label="Take photo" disabled></button>
+    <span style="width:120px"></span>
+  </div>
+</div>
+<div id="rev" hidden></div>
+<nav><button id="tabCam" class="on">Camera</button><button id="tabSets">Sets (0)</button></nav>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), pad=n=>String(n).padStart(2,'0');
+const TYPES=['mushroom','tree','plant','animal','bird','fish','insect'];
+const iso=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+const stampOf=d=>iso(d).replace(/[-:]/g,'').replace('T','_');
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const lab=s=>'S'+pad(s.num);
+let db,fix=null,gpsErr='',stream=null,sets=[],photos=[],busy=false,view='cam',urls=[],wake=null;
+let curSet=+localStorage.curSet||null, lastType=localStorage.lastType||'mushroom';
+let outing=JSON.parse(localStorage.outing||'null');
+
+// ---------- storage ----------
+function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open('woods-capture',1);
+ r.onupgradeneeded=()=>{r.result.createObjectStore('photos',{keyPath:'id',autoIncrement:true});r.result.createObjectStore('sets',{keyPath:'id',autoIncrement:true})};
+ r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
+function idb(store,mode,fn){return new Promise((res,rej)=>{const t=db.transaction(store,mode),r=fn(t.objectStore(store));
+ t.oncomplete=()=>res(r&&r.result);t.onerror=t.onabort=()=>rej(t.error)})}
+async function load(){sets=await idb('sets','readonly',s=>s.getAll());photos=await idb('photos','readonly',s=>s.getAll());
+ sets.sort((a,b)=>a.num-b.num);if(!sets.find(s=>s.id===curSet))curSet=sets.length?sets[sets.length-1].id:null}
+async function makeSet(){
+ if(!outing){const d=new Date();outing={id:stampOf(d).slice(0,13),exported:false};localStorage.outing=JSON.stringify(outing)}
+ const num=sets.reduce((m,s)=>Math.max(m,s.num),0)+1;
+ curSet=await idb('sets','readwrite',s=>s.add({num,type:lastType,name:'',notes:'',created:iso(new Date())}));
+ localStorage.curSet=curSet;await load()}
+const putSet=s=>idb('sets','readwrite',st=>st.put(s));
+
+// ---------- GPS ----------
+function startGPS(){
+ if(!navigator.geolocation){gpsErr='This browser has no GPS.';return showGps()}
+ navigator.geolocation.watchPosition(p=>{fix={lat:p.coords.latitude,lon:p.coords.longitude,acc:p.coords.accuracy,alt:p.coords.altitude,ts:p.timestamp};gpsErr='';showGps()},
+  e=>{gpsErr=e.code===1?'Location blocked. Allow it in Chrome site settings.':'Waiting for GPS…';showGps()},
+  {enableHighAccuracy:true,maximumAge:0,timeout:30000});
+ setInterval(showGps,1000)}
+function showGps(){const g=$('gps'),t=$('gpsTxt');
+ if(!fix){g.className='bad';t.textContent=gpsErr||'Waiting for GPS…'}
+ else{const age=Math.round((Date.now()-fix.ts)/1000);g.className=fix.acc<=15?'good':fix.acc<=30?'fair':'bad';
+  t.textContent=`GPS ±${Math.round(fix.acc)} m · ${age} s ago`}
+ $('shutter').disabled=!fix||!stream||busy}
+
+// ---------- camera ----------
+async function startCam(){
+ if(stream)return;
+ try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:4096},height:{ideal:3072}},audio:false});
+  $('v').srcObject=stream;await $('v').play();$('camMsg').hidden=true;
+  try{wake=await navigator.wakeLock.request('screen')}catch(e){}
+ }catch(e){stream=null;$('camErr').textContent='Camera unavailable: '+e.message+'. You can still use the Phone camera app button.';$('camMsg').hidden=false}
+ showGps()}
+function stopCam(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}try{wake&&wake.release()}catch(e){}showGps()}
+function snap(src,w,h,max,q){const c=document.createElement('canvas'),k=Math.min(1,max/Math.max(w,h));
+ c.width=Math.round(w*k);c.height=Math.round(h*k);c.getContext('2d').drawImage(src,0,0,c.width,c.height);
+ return new Promise(r=>c.toBlob(r,'image/jpeg',q))}
+async function savePhoto(blob,thumb,when,f,source){
+ if(!curSet)await makeSet();
+ await idb('photos','readwrite',s=>s.add({setId:curSet,ts:iso(when),stamp:stampOf(when),ms:+when,lat:f.lat,lon:f.lon,acc:f.acc,alt:f.alt,
+  fixAge:Math.max(0,Math.round((when-f.ts)/1000)),source,blob,thumb}));
+ await load();render()}
+async function shoot(){
+ if(!fix||!stream||busy)return;
+ busy=true;showGps();
+ const f={...fix},when=new Date(),v=$('v'),w=v.videoWidth,h=v.videoHeight;
+ $('flash').classList.add('on');setTimeout(()=>$('flash').classList.remove('on'),60);
+ try{navigator.vibrate&&navigator.vibrate(30)}catch(e){}
+ try{const blob=await snap(v,w,h,99999,.9),thumb=await snap(v,w,h,240,.6);await savePhoto(blob,thumb,when,f,'camera')}
+ catch(e){alert('Could not save photo: '+e.message)}
+ busy=false;showGps()}
+$('native').onchange=async e=>{
+ if(!fix){alert('No GPS fix yet. Wait for the bar at the top to show a position.');e.target.value='';return}
+ for(const file of e.target.files){const bmp=await createImageBitmap(file),thumb=await snap(bmp,bmp.width,bmp.height,240,.6);
+  await savePhoto(file,thumb,new Date(file.lastModified||Date.now()),{...fix},'phone-camera-app')}
+ e.target.value=''};
+
+// ---------- render ----------
+function render(){
+ const s=sets.find(x=>x.id===curSet),mine=s?photos.filter(p=>p.setId===s.id):[];
+ $('setInfo').textContent=s?`${lab(s)} · ${mine.length} photo${mine.length===1?'':'s'}`:'No set yet. First photo starts one.';
+ $('type').value=s?s.type:lastType;
+ urls.forEach(URL.revokeObjectURL);urls=[];
+ const u=b=>{const x=URL.createObjectURL(b);urls.push(x);return x};
+ $('strip').innerHTML=mine.slice(-8).map(p=>`<img src="${u(p.thumb)}" alt="">`).join('');
+ $('tabSets').textContent=`Sets (${sets.length})`;
+ if(view==='rev')renderRev(u)}
+function renderRev(u){
+ const opts=v=>TYPES.map(t=>`<option${t===v?' selected':''}>${t}</option>`).join('');
+ let h=sets.slice().reverse().map(s=>{const ps=photos.filter(p=>p.setId===s.id).sort((a,b)=>a.ms-b.ms);
+  const best=ps.length?Math.round(Math.min(...ps.map(p=>p.acc))):null;
+  return `<section class="card" data-s="${s.id}"><h3><span>${lab(s)}${s.id===curSet?' (current)':''}</span><select data-f="type">${opts(s.type)}</select></h3>
+  <input data-f="name" placeholder="Name (optional)" value="${esc(s.name)}">
+  <textarea data-f="notes" rows="2" placeholder="Your notes, kept as written">${esc(s.notes)}</textarea>
+  <div class="thumbs">${ps.map(p=>`<figure><img src="${u(p.thumb)}" alt=""><button data-del="${p.id}" aria-label="Delete photo">×</button></figure>`).join('')}</div>
+  <p class="meta">${ps.length} photo${ps.length===1?'':'s'}${best!==null?` · best GPS ±${best} m`:' · empty set (not exported)'}</p>
+  <div style="display:flex;gap:8px"><button data-use="${s.id}" class="alt" style="flex:1">Shoot into this set</button><button data-delset="${s.id}" class="danger">Delete set</button></div></section>`}).join('');
+ const n=photos.length;
+ h+=`<section class="card"><h3>Outing ${esc(outing?outing.id:'(none yet)')}</h3>
+  <p class="meta">${n} photo${n===1?'':'s'} in ${sets.length} set${sets.length===1?'':'s'}${outing&&outing.exported?' · exported once':''}</p>
+  <button id="exp"${n?'':' disabled'}>Export zip</button>
+  ${navigator.canShare?'<button id="shr" class="alt"'+(n?'':' disabled')+'>Share zip…</button>':''}
+  <button id="clr" class="danger"${n||outing?'':' disabled'}>Clear phone and start new outing</button>
+  <p class="meta" id="expMsg"></p></section>`;
+ $('rev').innerHTML=h}
+
+// ---------- events ----------
+$('type').onchange=async e=>{lastType=e.target.value;localStorage.lastType=lastType;
+ const s=sets.find(x=>x.id===curSet);if(s){s.type=lastType;await putSet(s);render()}};
+$('newSet').onclick=async()=>{await makeSet();render()};
+$('shutter').onclick=shoot;$('startCam').onclick=startCam;
+$('tabCam').onclick=()=>show('cam');$('tabSets').onclick=()=>show('rev');
+function show(v){view=v;$('cam').hidden=$('ctl').hidden=v!=='cam';$('rev').hidden=v!=='rev';
+ $('tabCam').className=v==='cam'?'on':'';$('tabSets').className=v==='rev'?'on':'';
+ v==='cam'?startCam():stopCam();render()}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stopCam();else if(view==='cam')startCam()});
+$('rev').addEventListener('change',async e=>{const c=e.target.closest('[data-s]');if(!c||!e.target.dataset.f)return;
+ const s=sets.find(x=>x.id===+c.dataset.s);s[e.target.dataset.f]=e.target.value;await putSet(s);
+ if(e.target.dataset.f==='type'){lastType=s.type;localStorage.lastType=lastType}render()});
+$('rev').addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;
+ if(b.dataset.del){if(confirm('Delete this photo?')){await idb('photos','readwrite',s=>s.delete(+b.dataset.del));await load();render()}}
+ else if(b.dataset.delset){const id=+b.dataset.delset;if(confirm('Delete this set and all its photos?')){
+  for(const p of photos.filter(p=>p.setId===id))await idb('photos','readwrite',s=>s.delete(p.id));
+  await idb('sets','readwrite',s=>s.delete(id));await load();render()}}
+ else if(b.dataset.use){curSet=+b.dataset.use;localStorage.curSet=curSet;show('cam')}
+ else if(b.id==='exp')download();else if(b.id==='shr')share();else if(b.id==='clr')clearAll()});
+
+// ---------- zip ----------
+const CRC=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c>>>0}return t})();
+const crc32=u=>{let c=-1;for(let i=0;i<u.length;i++)c=CRC[(c^u[i])&255]^(c>>>8);return(c^-1)>>>0};
+async function makeZip(files){
+ const parts=[],cen=[],enc=new TextEncoder(),d=new Date();let off=0,csize=0;
+ const dt=(d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1),dd=((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate();
+ for(const f of files){
+  const data=f.data instanceof Blob?new Uint8Array(await f.data.arrayBuffer()):f.data,nm=enc.encode(f.name),crc=crc32(data);
+  const l=new DataView(new ArrayBuffer(30));
+  l.setUint32(0,0x04034b50,true);l.setUint16(4,20,true);l.setUint16(6,0x0800,true);l.setUint16(10,dt,true);l.setUint16(12,dd,true);
+  l.setUint32(14,crc,true);l.setUint32(18,data.length,true);l.setUint32(22,data.length,true);l.setUint16(26,nm.length,true);
+  const c=new DataView(new ArrayBuffer(46));
+  c.setUint32(0,0x02014b50,true);c.setUint16(4,20,true);c.setUint16(6,20,true);c.setUint16(8,0x0800,true);c.setUint16(12,dt,true);c.setUint16(14,dd,true);
+  c.setUint32(16,crc,true);c.setUint32(20,data.length,true);c.setUint32(24,data.length,true);c.setUint16(28,nm.length,true);c.setUint32(42,off,true);
+  parts.push(l.buffer,nm,data);cen.push(c.buffer,nm);off+=30+nm.length+data.length;csize+=46+nm.length}
+ const e=new DataView(new ArrayBuffer(22));
+ e.setUint32(0,0x06054b50,true);e.setUint16(8,files.length,true);e.setUint16(10,files.length,true);e.setUint32(12,csize,true);e.setUint32(16,off,true);
+ return new Blob([...parts,...cen,e.buffer],{type:'application/zip'})}
+async function buildZip(){
+ const files=[],used=new Set(),r6=x=>Math.round(x*1e6)/1e6;
+ const man={app:'woods-capture',version:1,outing_id:outing?outing.id:'',exported_at:iso(new Date()),tz_offset_min:-new Date().getTimezoneOffset(),sets:[],skipped_no_gps:[]};
+ for(const s of sets){const out=[];
+  for(const p of photos.filter(p=>p.setId===s.id).sort((a,b)=>a.ms-b.ms)){
+   if(p.lat==null){man.skipped_no_gps.push({set_id:lab(s),taken:p.ts});continue}
+   let fn=p.stamp+'.jpg',i=2;while(used.has(fn))fn=`${p.stamp}_${i++}.jpg`;used.add(fn);files.push({name:fn,data:p.blob});
+   out.push({file:fn,taken:p.ts,lat:r6(p.lat),lon:r6(p.lon),accuracy_m:Math.round(p.acc*10)/10,altitude_m:p.alt,fix_age_s:p.fixAge,source:p.source})}
+  if(!out.length)continue;
+  const best=out.reduce((a,b)=>b.accuracy_m<a.accuracy_m?b:a);
+  man.sets.push({set_id:lab(s),type:s.type,name:s.name,notes:s.notes,taken:out[0].taken,lat:best.lat,lon:best.lon,accuracy_m:best.accuracy_m,photos:out})}
+ files.unshift({name:'manifest.json',data:new TextEncoder().encode(JSON.stringify(man,null,1))});
+ return{blob:await makeZip(files),name:`woods_${outing?outing.id:'outing'}.zip`,n:files.length-1,man}}
+function markExported(r){outing.exported=true;localStorage.outing=JSON.stringify(outing);
+ $('expMsg').textContent=`Saved ${r.name}: ${r.n} photos in ${r.man.sets.length} sets, ${(r.blob.size/1048576).toFixed(1)} MB.`+(r.man.skipped_no_gps.length?` ${r.man.skipped_no_gps.length} photos without GPS were left out.`:'')}
+async function download(){try{const r=await buildZip(),a=document.createElement('a');a.href=URL.createObjectURL(r.blob);a.download=r.name;
+ document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),60000);markExported(r)}catch(e){alert('Export failed: '+e.message)}}
+async function share(){try{const r=await buildZip(),f=new File([r.blob],r.name,{type:'application/zip'});
+ if(!navigator.canShare({files:[f]}))return alert('Sharing files is not supported here. Use Export zip.');
+ await navigator.share({files:[f]});markExported(r)}catch(e){if(e.name!=='AbortError')alert('Share failed: '+e.message)}}
+async function clearAll(){
+ if(!confirm(outing&&outing.exported?'Delete all photos from this phone and start a new outing?':'You have NOT exported this outing yet. Delete everything anyway?'))return;
+ await idb('photos','readwrite',s=>s.clear());await idb('sets','readwrite',s=>s.clear());
+ outing=null;curSet=null;localStorage.removeItem('outing');localStorage.removeItem('curSet');await load();render()}
+
+// ---------- start ----------
+(async()=>{
+ $('type').innerHTML=TYPES.map(t=>`<option>${t}</option>`).join('');
+ try{db=await openDB();await load()}catch(e){alert('Storage unavailable: '+e.message)}
+ try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}
+ if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+ render();startGPS();startCam()})();
+</script></body></html>
